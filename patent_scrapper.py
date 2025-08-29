@@ -13,17 +13,22 @@ import tiktoken
 # Load environment variables if .env exists
 load_dotenv()
 
-def fetch_top_patents(query, num_results=10):
+def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, date_type='publish'):
     """
     Searches for the most relevant and recent patents using SerpAPI's Google Patents engine.
-    Returns a list of patent IDs and their links.
+    Returns a list of patent IDs, their links, and filing dates.
     """
     params = {
         "engine": "google_patents",
         "q": query,
         "api_key": os.getenv("SERPAPI_API_KEY"),
-        "sort_by": "date"  # Sort by date for most recent
+        # Removed "sort_by": "date" to default to relevance
     }
+    
+    if after_date:
+        params["after"] = f"{date_type}:{after_date}"
+    if before_date:
+        params["before"] = f"{date_type}:{before_date}"
     
     client = serpapi.Client(api_key=params["api_key"])
     result = client.search(params)
@@ -35,9 +40,12 @@ def fetch_top_patents(query, num_results=10):
     patents = []
     for res in organic_results[:num_results]:
         patent_id = res.get('patent_id')
-        link = res.get('link', f"https://patents.google.com/patent/{patent_id}")
         if patent_id:
-            patents.append({'id': patent_id, 'link': link})
+            # Clean for link: remove 'patent/' prefix if present, keep suffix like '/en'
+            clean_id_for_link = patent_id.lstrip('patent/')
+            link = res.get('link', f"https://patents.google.com/patent/{clean_id_for_link}")
+            filing_date = res.get('filing_date', 'N/A')  # Extract filing date
+            patents.append({'id': patent_id, 'link': link, 'filing_date': filing_date})  # Use full patent_id for details API
     
     st.write(f"Found {len(patents)} patents for query: {query}")
     return patents
@@ -217,12 +225,12 @@ def generate_html(all_practices, user_query):
     <head>
         <title>Patent Analysis Summary</title>
         <style>
-            body { font-family: Arial, sans-serif; }
-            h1 { text-align: center; }
-            h2 { color: #333; }
-            table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-            th { background-color: #f2f2f2; }
+            body {{ font-family: Arial, sans-serif; }}
+            h1 {{ text-align: center; }}
+            h2 {{ color: #333; }}
+            table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
         </style>
     </head>
     <body>
@@ -232,7 +240,8 @@ def generate_html(all_practices, user_query):
     for patent_id, data in all_practices.items():
         practices = data['practices']
         link = data['link']
-        html_content += f"<h2>Patent <a href='{link}'>{patent_id}</a></h2>"
+        filing_date = data['filing_date']
+        html_content += f"<h2>Patent <a href='{link}'>{patent_id}</a> (Filing Date: {filing_date})</h2>"
         
         if practices:
             for i, practice in enumerate(practices):
@@ -271,26 +280,42 @@ user_query = st.text_input("Search Query (e.g., 'solar panel manufacturing proce
 analysis_prompt = st.text_input("Analysis Prompt", value="summarize what is reported as current practice")
 num_patents = st.slider("Number of Patents to Analyze", min_value=1, max_value=20, value=10)
 
+# Date range controls
+date_type = st.selectbox("Date Type for Filtering", options=["publish", "filing", "priority"], index=0)
+after_date = st.text_input("After Date (YYYYMMDD, optional)", value="")
+before_date = st.text_input("Before Date (YYYYMMDD, optional)", value="")
+
 if st.button("Run Analysis"):
     if not serpapi_key or not xai_key:
         st.error("Please enter both API keys.")
     else:
         try:
             with st.spinner("Fetching and analyzing patents..."):
-                patents = fetch_top_patents(user_query, num_results=num_patents)
+                patents = fetch_top_patents(
+                    user_query, 
+                    num_results=num_patents, 
+                    after_date=after_date if after_date else None, 
+                    before_date=before_date if before_date else None, 
+                    date_type=date_type
+                )
                 all_practices = {}
                 
                 for patent in patents:
                     patent_id = patent['id']
                     practices = analyze_patent(patent_id, analysis_prompt)
-                    all_practices[patent_id] = {'practices': practices, 'link': patent['link']}
+                    all_practices[patent_id] = {
+                        'practices': practices, 
+                        'link': patent['link'],
+                        'filing_date': patent['filing_date']
+                    }
                 
                 # Display results in app (optional; shows DataFrames)
                 for patent_id, data in all_practices.items():
                     practices = data['practices']
+                    filing_date = data['filing_date']
                     if practices:
                         df = pd.DataFrame(practices)
-                        st.subheader(f"Patent {patent_id}")
+                        st.subheader(f"Patent {patent_id} (Filing Date: {filing_date})")
                         st.dataframe(df)
                 
                 # Generate and download HTML
