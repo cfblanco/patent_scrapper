@@ -1,0 +1,302 @@
+import streamlit as st
+import os
+import requests
+import re
+import json
+import pandas as pd
+from bs4 import BeautifulSoup
+import serpapi
+from openai import OpenAI
+from dotenv import load_dotenv
+import tiktoken
+
+# Load environment variables if .env exists
+load_dotenv()
+
+def fetch_top_patents(query, num_results=10):
+    """
+    Searches for the most relevant and recent patents using SerpAPI's Google Patents engine.
+    Returns a list of patent IDs and their links.
+    """
+    params = {
+        "engine": "google_patents",
+        "q": query,
+        "api_key": os.getenv("SERPAPI_API_KEY"),
+        "sort_by": "date"  # Sort by date for most recent
+    }
+    
+    client = serpapi.Client(api_key=params["api_key"])
+    result = client.search(params)
+    
+    if 'error' in result:
+        raise ValueError(f"Error searching patents: {result['error']}")
+    
+    organic_results = result.get('organic_results', [])
+    patents = []
+    for res in organic_results[:num_results]:
+        patent_id = res.get('patent_id')
+        link = res.get('link', f"https://patents.google.com/patent/{patent_id}")
+        if patent_id:
+            patents.append({'id': patent_id, 'link': link})
+    
+    st.write(f"Found {len(patents)} patents for query: {query}")
+    return patents
+
+def fetch_patent_text(patent_id):
+    """
+    Fetches the full text of a patent using SerpAPI.
+    Returns combined abstract, description, and claims as a string.
+    """
+    params = {
+        "engine": "google_patents_details",
+        "patent_id": patent_id,
+        "api_key": os.getenv("SERPAPI_API_KEY")
+    }
+    
+    # Use the modern serpapi.Client
+    client = serpapi.Client(api_key=params["api_key"])
+    result = client.search(params)
+    
+    if 'error' in result:
+        raise ValueError(f"Error fetching patent details: {result['error']}")
+    
+    # Extract abstract, claims, and description_link
+    abstract = result.get('abstract', '')
+    claims = ' '.join(result.get('claims', []))
+    description_link = result.get('description_link')
+    
+    if not description_link:
+        raise ValueError("Description link not found in API response")
+    
+    # Fetch the description HTML
+    response = requests.get(description_link)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    # Extract text from the description HTML (adjust selector if needed based on actual structure)
+    description = soup.get_text(separator='\n', strip=True)
+    
+    # Combine all text
+    full_text = f"Abstract: {abstract}\n\nDescription: {description}\n\nClaims: {claims}"
+    return full_text
+
+def filter_current_practice_sections(full_text):
+    """
+    Filters the full patent text to extract sections discussing current practice.
+    Searches for keywords like 'background', 'prior art', 'current', 'existing', 'conventional'.
+    Extracts paragraphs containing these keywords.
+    """
+    keywords = [
+        r'\bbackground\b', r'\bprior art\b', r'\bcurrent practice\b',
+        r'\bexisting method\b', r'\bconventional\b', r'\brelated art\b',
+        r'\bstate of the art\b'
+    ]
+    
+    # Split text into paragraphs (assuming double newlines separate them)
+    paragraphs = re.split(r'\n{2,}', full_text)
+    
+    filtered_paras = []
+    for para in paragraphs:
+        para_lower = para.lower()
+        if any(re.search(kw, para_lower, re.IGNORECASE) for kw in keywords):
+            filtered_paras.append(para)
+    
+    if not filtered_paras:
+        return full_text  # Fallback to full text if no matches
+    
+    filtered_text = '\n\n'.join(filtered_paras)
+    st.write(f"Filtered text length: {len(filtered_text)} characters")
+    return filtered_text
+
+def analyze_patent(patent_id, user_prompt):
+    """
+    Analyzes the patent text based on the user prompt using xAI Grok API.
+    Includes pre-filtering for current practice sections and handles large texts by chunking.
+    Outputs structured JSON for table display.
+    """
+    full_text = fetch_patent_text(patent_id)
+    filtered_text = filter_current_practice_sections(full_text)
+    
+    # Initialize xAI client
+    client = OpenAI(
+        api_key=os.getenv("XAI_API_KEY"),
+        base_url="https://api.x.ai/v1",
+    )
+    
+    # Updated system prompt to retain details and output JSON
+    system_message = (
+        "You are an expert in patent analysis. Use the provided patent text chunk to answer the query accurately and concisely. "
+        "In your summary, retain as much as possible any processing steps (e.g., 'heat component to 40 degrees'), "
+        "and any quantitative data referring to cost, materials, or energy use of these processing steps. "
+        "If the chunk is incomplete, note what might be missing. "
+        "Output your response strictly in JSON format with the following structure: "
+        "{'current_practices': [{'description': 'brief description of the practice', "
+        "'process_steps': ['step 1 with details', 'step 2 with quant data'], "
+        "'limitations': ['limitation 1', 'limitation 2']}, ...]}"
+    )
+    
+    # Token encoder (approximate for Grok using GPT-4 tokenizer)
+    encoder = tiktoken.encoding_for_model("gpt-4")
+    
+    # Chunk the filtered_text into token-limited parts
+    def chunk_text(text, max_tokens=100000):
+        words = text.split()
+        current_chunk = []
+        current_tokens = 0
+        for word in words:
+            word_tokens = len(encoder.encode(word + " "))  # Approximate
+            if current_tokens + word_tokens > max_tokens:
+                yield ' '.join(current_chunk)
+                current_chunk = [word]
+                current_tokens = word_tokens
+            else:
+                current_chunk.append(word)
+                current_tokens += word_tokens
+        if current_chunk:
+            yield ' '.join(current_chunk)
+    
+    chunks = list(chunk_text(filtered_text))
+    analyses = []
+    
+    for idx, chunk in enumerate(chunks, 1):
+        # Estimate tokens for logging (optional)
+        chunk_tokens = len(encoder.encode(chunk))
+        st.write(f"Processing chunk {idx}/{len(chunks)} with ~{chunk_tokens} tokens for patent {patent_id}")
+        
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": f"Patent Text Chunk {idx}/{len(chunks)}:\n{chunk}\n\nQuery: {user_prompt}"}
+        ]
+        
+        response = client.chat.completions.create(
+            model="grok-3",  # Or "grok-beta" if available
+            messages=messages,
+            max_tokens=1000,
+            temperature=0.7,
+        )
+        analyses.append(response.choices[0].message.content)
+    
+    # Combine analyses from chunks
+    combined_analysis = "\n\n".join([f"Chunk {i}: {a}" for i, a in enumerate(analyses, 1)])
+    
+    # Final synthesis step to compile into single JSON
+    synthesis_system = (
+        "You are an expert synthesizer. Combine the following chunk analyses into a single coherent JSON output. "
+        "Avoid duplicates and organize current practices separately. "
+        "Retain all processing steps, quantitative data, and limitations. "
+        "Output strictly in JSON format: "
+        "{'current_practices': [{'description': 'brief description', "
+        "'process_steps': ['step 1', 'step 2'], "
+        "'limitations': ['lim 1', 'lim 2']}, ...]}"
+    )
+    
+    synthesis_messages = [
+        {"role": "system", "content": synthesis_system},
+        {"role": "user", "content": f"Chunk analyses:\n{combined_analysis}\n\nOriginal Query: {user_prompt}"}
+    ]
+    
+    final_response = client.chat.completions.create(
+        model="grok-3",
+        messages=synthesis_messages,
+        max_tokens=2000,
+        temperature=0.5,
+    )
+    
+    # Parse the JSON
+    try:
+        json_output = json.loads(final_response.choices[0].message.content)
+        practices = json_output.get('current_practices', [])
+    except json.JSONDecodeError:
+        raise ValueError("Failed to parse synthesis output as JSON")
+    
+    return practices
+
+def generate_html(all_practices, user_query):
+    html_content = """
+    <html>
+    <head>
+        <title>Patent Analysis Summary</title>
+        <style>
+            body { font-family: Arial, sans-serif; }
+            h1 { text-align: center; }
+            h2 { color: #333; }
+            table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f2f2f2; }
+        </style>
+    </head>
+    <body>
+        <h1>Patent Analysis Summary for Query: {}</h1>
+    """.format(user_query)
+    
+    for patent_id, data in all_practices.items():
+        practices = data['practices']
+        link = data['link']
+        html_content += f"<h2>Patent <a href='{link}'>{patent_id}</a></h2>"
+        
+        if practices:
+            for i, practice in enumerate(practices):
+                html_content += f"<h3>Current Practice {i+1}: {practice['description']}</h3>"
+                
+                # Process Steps Table
+                steps_df = pd.DataFrame({'Process Steps': practice['process_steps']})
+                html_content += "<h4>Process Steps</h4>" + steps_df.to_html(index=False)
+                
+                # Limitations Table
+                lims_df = pd.DataFrame({'Limitations': practice['limitations']})
+                html_content += "<h4>Limitations</h4>" + lims_df.to_html(index=False)
+                
+                html_content += "<hr>"
+        else:
+            html_content += "<p>No current practices extracted.</p><hr>"
+    
+    html_content += "</body></html>"
+    return html_content
+
+# Streamlit App
+st.title("Patent Analysis App")
+
+# User inputs for API keys (secure; not stored)
+serpapi_key = st.text_input("SerpAPI Key", type="password")
+xai_key = st.text_input("xAI API Key", type="password")
+
+# Set environment variables for keys (to match your code's os.getenv)
+if serpapi_key:
+    os.environ["SERPAPI_API_KEY"] = serpapi_key
+if xai_key:
+    os.environ["XAI_API_KEY"] = xai_key
+
+# Other customizable inputs
+user_query = st.text_input("Search Query (e.g., 'solar panel manufacturing process')", value="solar panel manufacturing process")
+analysis_prompt = st.text_input("Analysis Prompt", value="summarize what is reported as current practice")
+num_patents = st.slider("Number of Patents to Analyze", min_value=1, max_value=20, value=10)
+
+if st.button("Run Analysis"):
+    if not serpapi_key or not xai_key:
+        st.error("Please enter both API keys.")
+    else:
+        try:
+            with st.spinner("Fetching and analyzing patents..."):
+                patents = fetch_top_patents(user_query, num_results=num_patents)
+                all_practices = {}
+                
+                for patent in patents:
+                    patent_id = patent['id']
+                    practices = analyze_patent(patent_id, analysis_prompt)
+                    all_practices[patent_id] = {'practices': practices, 'link': patent['link']}
+                
+                # Display results in app (optional; shows DataFrames)
+                for patent_id, data in all_practices.items():
+                    practices = data['practices']
+                    if practices:
+                        df = pd.DataFrame(practices)
+                        st.subheader(f"Patent {patent_id}")
+                        st.dataframe(df)
+                
+                # Generate and download HTML
+                html_content = generate_html(all_practices, user_query)
+                st.download_button("Download HTML Report", html_content, file_name="patent_analysis.html", mime="text/html")
+                
+                st.success("Analysis complete!")
+        except Exception as e:
+            st.error(f"Error: {e}")
