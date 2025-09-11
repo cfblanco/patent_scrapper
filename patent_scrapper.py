@@ -17,6 +17,7 @@ def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, 
     """
     Searches for the most relevant and recent patents using SerpAPI's Google Patents engine.
     Returns a list of patent IDs, their links, filing dates, titles, and inventors.
+    Attempts to fetch up to num_results by adjusting start parameter if supported.
     """
     params = {
         "engine": "google_patents",
@@ -30,33 +31,48 @@ def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, 
         params["before"] = f"{date_type}:{before_date}"
     
     client = serpapi.Client(api_key=params["api_key"])
-    result = client.search(params)
+    all_patents = []
+    start = 0
+    while len(all_patents) < num_results:
+        params["start"] = start
+        result = client.search(params)
+        
+        if 'error' in result:
+            st.write(f"Error searching patents at start {start}: {result['error']}")
+            break
+        
+        organic_results = result.get('organic_results', [])
+        st.write(f"Fetched {len(organic_results)} results at start {start}, total so far: {len(all_patents)}")
+        
+        if not organic_results:
+            st.write(f"No more results found after start {start}")
+            break
+        
+        for res in organic_results:
+            patent_id = res.get('patent_id')
+            if patent_id:
+                clean_id_for_link = patent_id.lstrip('patent/')
+                link = res.get('link', f"https://patents.google.com/patent/{clean_id_for_link}")
+                filing_date = res.get('filing_date', 'N/A')
+                title = res.get('title', 'No title available')
+                inventors = res.get('inventor', ['Unknown Inventor'])
+                if isinstance(inventors, str):
+                    inventors = [inventors]
+                all_patents.append({
+                    'id': patent_id,
+                    'link': link,
+                    'filing_date': filing_date,
+                    'title': title,
+                    'inventors': inventors
+                })
+        
+        start += 10  # Increment by 10 (SerpAPI's typical page size)
+        if len(organic_results) < 10:  # If less than a full page, likely end of results
+            break
     
-    if 'error' in result:
-        raise ValueError(f"Error searching patents: {result['error']}")
-    
-    organic_results = result.get('organic_results', [])
-    patents = []
-    for res in organic_results[:num_results]:
-        patent_id = res.get('patent_id')
-        if patent_id:
-            # Clean for link: remove 'patent/' prefix if present, keep suffix like '/en'
-            clean_id_for_link = patent_id.lstrip('patent/')
-            link = res.get('link', f"https://patents.google.com/patent/{clean_id_for_link}")
-            filing_date = res.get('filing_date', 'N/A')  # Extract filing date
-            title = res.get('title', 'No title available')  # Extract title
-            inventors = res.get('inventor', ['Unknown Inventor'])  # Extract inventors, default to list
-            if isinstance(inventors, str):  # Handle case where it's a single string
-                inventors = [inventors]
-            patents.append({
-                'id': patent_id,
-                'link': link,
-                'filing_date': filing_date,
-                'title': title,
-                'inventors': inventors
-            })
-    
-    st.write(f"Found {len(patents)} patents for query: {query}")
+    # Truncate to requested number if more were fetched
+    patents = all_patents[:num_results]
+    st.write(f"Returning {len(patents)} patents for query: {query}")
     return patents
 
 def fetch_patent_text(patent_id):
