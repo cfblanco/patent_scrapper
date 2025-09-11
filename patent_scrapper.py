@@ -10,7 +10,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import tiktoken
 
-# Load environment variables if .env exists
+# Load environment variables if .env exists (for local testing)
 load_dotenv()
 
 def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, date_type='publish'):
@@ -22,7 +22,7 @@ def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, 
     params = {
         "engine": "google_patents",
         "q": query,
-        "api_key": os.getenv("SERPAPI_API_KEY"),
+        "api_key": os.getenv("SERPAPI_API_KEY") or st.secrets.get("SERPAPI_API_KEY"),
     }
     
     if after_date:
@@ -86,7 +86,7 @@ def fetch_patent_text(patent_id):
     params = {
         "engine": "google_patents_details",
         "patent_id": patent_id,
-        "api_key": os.getenv("SERPAPI_API_KEY")
+        "api_key": os.getenv("SERPAPI_API_KEY") or st.secrets.get("SERPAPI_API_KEY"),
     }
     
     # Use the modern serpapi.Client
@@ -158,7 +158,7 @@ def analyze_patent(patent_id, user_prompt):
     """
     Analyzes the patent text based on the user prompt using xAI Grok API.
     Includes pre-filtering for current practice sections and handles large texts by chunking.
-    Outputs structured JSON for table display.
+    Outputs structured JSON for table display with retry on JSON parse failure.
     """
     full_text = fetch_patent_text(patent_id)
     if full_text is None:
@@ -168,7 +168,7 @@ def analyze_patent(patent_id, user_prompt):
     
     # Initialize xAI client
     client = OpenAI(
-        api_key=os.getenv("XAI_API_KEY"),
+        api_key=os.getenv("XAI_API_KEY") or st.secrets.get("XAI_API_KEY"),
         base_url="https://api.x.ai/v1",
     )
     
@@ -208,7 +208,6 @@ def analyze_patent(patent_id, user_prompt):
     analyses = []
     
     for idx, chunk in enumerate(chunks, 1):
-        # Estimate tokens for logging (optional)
         chunk_tokens = len(encoder.encode(chunk))
         st.write(f"Processing chunk {idx}/{len(chunks)} with ~{chunk_tokens} tokens for patent {patent_id}")
         
@@ -218,17 +217,15 @@ def analyze_patent(patent_id, user_prompt):
         ]
         
         response = client.chat.completions.create(
-            model="grok-3-mini",  # Or "grok-beta" if available
+            model="grok-3",
             messages=messages,
             max_tokens=1000,
             temperature=0.7,
         )
         analyses.append(response.choices[0].message.content)
     
-    # Combine analyses from chunks
     combined_analysis = "\n\n".join([f"Chunk {i}: {a}" for i, a in enumerate(analyses, 1)])
     
-    # Final synthesis step to compile into single JSON
     synthesis_system = (
         "You are an expert synthesizer. Combine the following chunk analyses into a single coherent JSON output. "
         "Avoid duplicates and organize current practices separately. "
@@ -244,38 +241,44 @@ def analyze_patent(patent_id, user_prompt):
         {"role": "user", "content": f"Chunk analyses:\n{combined_analysis}\n\nOriginal Query: {user_prompt}"}
     ]
     
-    final_response = client.chat.completions.create(
-        model="grok-3",
-        messages=synthesis_messages,
-        max_tokens=2000,
-        temperature=0.5,
-    )
-    
-    # Log raw response for debugging
-    raw_response = final_response.choices[0].message.content
-    st.write(f"Raw synthesis response: {raw_response}")
-    
-    # Attempt to parse JSON with fallback
-    try:
-        json_output = json.loads(raw_response)
-        practices = json_output.get('current_practices', [])
-    except json.JSONDecodeError as e:
-        st.write(f"JSON parsing error: {str(e)}. Attempting to clean response...")
-        # Try to extract JSON by removing potential extra text
-        import re
-        potential_json = re.search(r'\{.*\}', raw_response, re.DOTALL)
-        if potential_json:
-            try:
-                json_output = json.loads(potential_json.group())
-                practices = json_output.get('current_practices', [])
-                st.write("Cleaned response parsed successfully.")
-            except json.JSONDecodeError:
-                st.write("Failed to clean and parse response. Returning empty list.")
-                practices = []
-        else:
-            st.write("No valid JSON detected. Returning empty list.")
-            practices = []
-    
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        final_response = client.chat.completions.create(
+            model="grok-3",
+            messages=synthesis_messages,
+            max_tokens=2000,
+            temperature=0.5,
+        )
+        
+        raw_response = final_response.choices[0].message.content
+        st.write(f"Raw synthesis response (attempt {attempt + 1}/{max_retries + 1}): {raw_response}")
+        
+        try:
+            json_output = json.loads(raw_response)
+            practices = json_output.get('current_practices', [])
+            st.write("JSON parsed successfully.")
+            break
+        except json.JSONDecodeError as e:
+            st.write(f"JSON parsing error (attempt {attempt + 1}): {str(e)}")
+            if attempt == max_retries:
+                st.write("Max retries reached. Attempting to clean response...")
+                import re
+                potential_json = re.search(r'\{.*\}', raw_response, re.DOTALL)
+                if potential_json:
+                    try:
+                        json_output = json.loads(potential_json.group())
+                        practices = json_output.get('current_practices', [])
+                        st.write("Cleaned response parsed successfully.")
+                        break
+                    except json.JSONDecodeError:
+                        st.write("Failed to clean and parse response. Returning empty list.")
+                        practices = []
+                else:
+                    st.write("No valid JSON detected. Returning empty list.")
+                    practices = []
+            else:
+                st.write("Retrying synthesis...")
+
     return practices
 
 def generate_html(all_practices, user_query):
@@ -326,15 +329,19 @@ def generate_html(all_practices, user_query):
 # Streamlit App
 st.title("Patent Analysis App")
 
-# User inputs for API keys (secure; not stored)
-serpapi_key = st.text_input("SerpAPI Key", type="password")
-xai_key = st.text_input("xAI API Key", type="password")
+# User inputs for API keys (secure; optional override)
+serpapi_key = st.text_input("SERPAPI Key (optional)", type="password")
+xai_key = st.text_input("xAI API Key (optional)", type="password")
 
-# Set environment variables for keys (to match your code's os.getenv)
+# Set environment variables with fallback to secrets
 if serpapi_key:
     os.environ["SERPAPI_API_KEY"] = serpapi_key
+else:
+    os.environ["SERPAPI_API_KEY"] = os.getenv("SERPAPI_API_KEY") or st.secrets.get("SERPAPI_API_KEY", "")
 if xai_key:
     os.environ["XAI_API_KEY"] = xai_key
+else:
+    os.environ["XAI_API_KEY"] = os.getenv("XAI_API_KEY") or st.secrets.get("XAI_API_KEY", "")
 
 # Other customizable inputs
 user_query = st.text_input("Search Query (e.g., 'solar panel manufacturing process')", value="solar panel manufacturing process")
@@ -347,8 +354,8 @@ after_date = st.text_input("After Date (YYYYMMDD, optional)", value="")
 before_date = st.text_input("Before Date (YYYYMMDD, optional)", value="")
 
 if st.button("Run Analysis"):
-    if not serpapi_key or not xai_key:
-        st.error("Please enter both API keys.")
+    if not os.getenv("SERPAPI_API_KEY") or not os.getenv("XAI_API_KEY"):
+        st.error("Please enter API keys or ensure they are set in Secrets.")
     else:
         try:
             with st.spinner("Fetching and analyzing patents..."):
