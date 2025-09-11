@@ -242,7 +242,7 @@ def analyze_patent(patent_id, user_prompt):
     ]
     
     final_response = client.chat.completions.create(
-        model="grok-3",
+        model="grok-3-mini",
         messages=synthesis_messages,
         max_tokens=2000,
         temperature=0.5,
