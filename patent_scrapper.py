@@ -172,13 +172,13 @@ def analyze_patent(patent_id, user_prompt):
         base_url="https://api.x.ai/v1",
     )
     
-    # Updated system prompt to retain details and output JSON
+    # Updated system prompt to retain details and enforce strict JSON
     system_message = (
         "You are an expert in patent analysis. Use the provided patent text chunk to answer the query accurately and concisely. "
         "In your summary, retain as much as possible any processing steps (e.g., 'heat component to 40 degrees'), "
         "and any quantitative data referring to cost, materials, or energy use of these processing steps. "
         "If the chunk is incomplete, note what might be missing. "
-        "Output your response strictly in JSON format with the following structure: "
+        "Output ONLY valid JSON with no additional text, strictly following this structure: "
         "{'current_practices': [{'description': 'brief description of the practice', "
         "'process_steps': ['step 1 with details', 'step 2 with quant data'], "
         "'limitations': ['limitation 1', 'limitation 2']}, ...]}"
@@ -218,7 +218,7 @@ def analyze_patent(patent_id, user_prompt):
         ]
         
         response = client.chat.completions.create(
-            model="grok-3",  # Or "grok-beta" if available
+            model="grok-3-mini",  # Or "grok-beta" if available
             messages=messages,
             max_tokens=1000,
             temperature=0.7,
@@ -233,7 +233,7 @@ def analyze_patent(patent_id, user_prompt):
         "You are an expert synthesizer. Combine the following chunk analyses into a single coherent JSON output. "
         "Avoid duplicates and organize current practices separately. "
         "Retain all processing steps, quantitative data, and limitations. "
-        "Output strictly in JSON format: "
+        "Output ONLY valid JSON with no additional text, strictly following this structure: "
         "{'current_practices': [{'description': 'brief description', "
         "'process_steps': ['step 1', 'step 2'], "
         "'limitations': ['lim 1', 'lim 2']}, ...]}"
@@ -251,12 +251,30 @@ def analyze_patent(patent_id, user_prompt):
         temperature=0.5,
     )
     
-    # Parse the JSON
+    # Log raw response for debugging
+    raw_response = final_response.choices[0].message.content
+    st.write(f"Raw synthesis response: {raw_response}")
+    
+    # Attempt to parse JSON with fallback
     try:
-        json_output = json.loads(final_response.choices[0].message.content)
+        json_output = json.loads(raw_response)
         practices = json_output.get('current_practices', [])
-    except json.JSONDecodeError:
-        raise ValueError("Failed to parse synthesis output as JSON")
+    except json.JSONDecodeError as e:
+        st.write(f"JSON parsing error: {str(e)}. Attempting to clean response...")
+        # Try to extract JSON by removing potential extra text
+        import re
+        potential_json = re.search(r'\{.*\}', raw_response, re.DOTALL)
+        if potential_json:
+            try:
+                json_output = json.loads(potential_json.group())
+                practices = json_output.get('current_practices', [])
+                st.write("Cleaned response parsed successfully.")
+            except json.JSONDecodeError:
+                st.write("Failed to clean and parse response. Returning empty list.")
+                practices = []
+        else:
+            st.write("No valid JSON detected. Returning empty list.")
+            practices = []
     
     return practices
 
