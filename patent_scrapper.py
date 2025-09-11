@@ -16,13 +16,12 @@ load_dotenv()
 def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, date_type='publish'):
     """
     Searches for the most relevant and recent patents using SerpAPI's Google Patents engine.
-    Returns a list of patent IDs, their links, and filing dates.
+    Returns a list of patent IDs, their links, filing dates, titles, and inventors.
     """
     params = {
         "engine": "google_patents",
         "q": query,
         "api_key": os.getenv("SERPAPI_API_KEY"),
-        # Removed "sort_by": "date" to default to relevance
     }
     
     if after_date:
@@ -45,7 +44,17 @@ def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, 
             clean_id_for_link = patent_id.lstrip('patent/')
             link = res.get('link', f"https://patents.google.com/patent/{clean_id_for_link}")
             filing_date = res.get('filing_date', 'N/A')  # Extract filing date
-            patents.append({'id': patent_id, 'link': link, 'filing_date': filing_date})  # Use full patent_id for details API
+            title = res.get('title', 'No title available')  # Extract title
+            inventors = res.get('inventor', ['Unknown Inventor'])  # Extract inventors, default to list
+            if isinstance(inventors, str):  # Handle case where it's a single string
+                inventors = [inventors]
+            patents.append({
+                'id': patent_id,
+                'link': link,
+                'filing_date': filing_date,
+                'title': title,
+                'inventors': inventors
+            })
     
     st.write(f"Found {len(patents)} patents for query: {query}")
     return patents
@@ -254,7 +263,9 @@ def generate_html(all_practices, user_query):
         practices = data['practices']
         link = data['link']
         filing_date = data['filing_date']
-        html_content += f"<h2>Patent <a href='{link}'>{patent_id}</a> (Filing Date: {filing_date})</h2>"
+        title = data['title']
+        inventors = ', '.join(data['inventors'])  # Join inventors list into a string
+        html_content += f"<h2>Patent <a href='{link}'>{patent_id}</a> (Title: {title}, Inventor(s): {inventors}, Filing Date: {filing_date})</h2>"
         
         if practices:
             for i, practice in enumerate(practices):
@@ -320,16 +331,20 @@ if st.button("Run Analysis"):
                         all_practices[patent_id] = {
                             'practices': practices,
                             'link': patent['link'],
-                            'filing_date': patent['filing_date']
+                            'filing_date': patent['filing_date'],
+                            'title': patent['title'],
+                            'inventors': patent['inventors']
                         }
                 
                 # Display results in app (optional; shows DataFrames)
                 for patent_id, data in all_practices.items():
                     practices = data['practices']
                     filing_date = data['filing_date']
+                    title = data['title']
+                    inventors = ', '.join(data['inventors'])
                     if practices:
                         df = pd.DataFrame(practices)
-                        st.subheader(f"Patent {patent_id} (Filing Date: {filing_date})")
+                        st.subheader(f"Patent {patent_id} (Title: {title}, Inventor(s): {inventors}, Filing Date: {filing_date})")
                         st.dataframe(df)
                 
                 # Generate and download HTML
