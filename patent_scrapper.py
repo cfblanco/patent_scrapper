@@ -53,7 +53,7 @@ def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, 
 def fetch_patent_text(patent_id):
     """
     Fetches the full text of a patent using SerpAPI.
-    Returns combined abstract, description, and claims as a string.
+    Returns combined abstract, description, and claims as a string, or None if link is missing.
     """
     params = {
         "engine": "google_patents_details",
@@ -63,10 +63,15 @@ def fetch_patent_text(patent_id):
     
     # Use the modern serpapi.Client
     client = serpapi.Client(api_key=params["api_key"])
-    result = client.search(params)
+    try:
+        result = client.search(params)
+    except Exception as e:
+        st.write(f"Error fetching details for patent {patent_id}: {str(e)}")
+        return None
     
     if 'error' in result:
-        raise ValueError(f"Error fetching patent details: {result['error']}")
+        st.write(f"API error for patent {patent_id}: {result['error']}")
+        return None
     
     # Extract abstract, claims, and description_link
     abstract = result.get('abstract', '')
@@ -74,14 +79,19 @@ def fetch_patent_text(patent_id):
     description_link = result.get('description_link')
     
     if not description_link:
-        raise ValueError("Description link not found in API response")
+        st.write(f"Description link not found for patent {patent_id}, skipping.")
+        return None
     
     # Fetch the description HTML
-    response = requests.get(description_link)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, 'html.parser')
+    try:
+        response = requests.get(description_link)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+    except requests.RequestException as e:
+        st.write(f"Failed to fetch description for patent {patent_id}: {str(e)}")
+        return None
     
-    # Extract text from the description HTML (adjust selector if needed based on actual structure)
+    # Extract text from the description HTML
     description = soup.get_text(separator='\n', strip=True)
     
     # Combine all text
@@ -123,6 +133,9 @@ def analyze_patent(patent_id, user_prompt):
     Outputs structured JSON for table display.
     """
     full_text = fetch_patent_text(patent_id)
+    if full_text is None:
+        st.write(f"Skipping analysis for patent {patent_id} due to missing data.")
+        return []  # Return empty list to avoid processing errors downstream
     filtered_text = filter_current_practice_sections(full_text)
     
     # Initialize xAI client
@@ -303,11 +316,12 @@ if st.button("Run Analysis"):
                 for patent in patents:
                     patent_id = patent['id']
                     practices = analyze_patent(patent_id, analysis_prompt)
-                    all_practices[patent_id] = {
-                        'practices': practices, 
-                        'link': patent['link'],
-                        'filing_date': patent['filing_date']
-                    }
+                    if practices:  # Only add if practices exist
+                        all_practices[patent_id] = {
+                            'practices': practices,
+                            'link': patent['link'],
+                            'filing_date': patent['filing_date']
+                        }
                 
                 # Display results in app (optional; shows DataFrames)
                 for patent_id, data in all_practices.items():
