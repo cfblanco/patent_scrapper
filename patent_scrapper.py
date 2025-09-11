@@ -17,7 +17,7 @@ def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, 
     """
     Searches for the most relevant and recent patents using SerpAPI's Google Patents engine.
     Returns a list of patent IDs, their links, filing dates, titles, and inventors.
-    Attempts to fetch up to num_results by adjusting start parameter if supported.
+    Attempts to fetch up to num_results by adjusting page and num parameters.
     """
     params = {
         "engine": "google_patents",
@@ -32,20 +32,22 @@ def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, 
     
     client = serpapi.Client(api_key=params["api_key"])
     all_patents = []
-    start = 0
+    page = 1
     while len(all_patents) < num_results:
-        params["start"] = start
+        params["page"] = page
+        params["num"] = min(100, num_results - len(all_patents))  # Fetch up to 100 or remaining needed
+        
         result = client.search(params)
         
         if 'error' in result:
-            st.write(f"Error searching patents at start {start}: {result['error']}")
+            st.write(f"Error searching patents at page {page}: {result['error']}")
             break
         
         organic_results = result.get('organic_results', [])
-        st.write(f"Fetched {len(organic_results)} results at start {start}, total so far: {len(all_patents)}")
+        st.write(f"Fetched {len(organic_results)} results at page {page}, total so far: {len(all_patents)}")
         
         if not organic_results:
-            st.write(f"No more results found after start {start}")
+            st.write(f"No more results found after page {page}")
             break
         
         for res in organic_results:
@@ -66,8 +68,9 @@ def fetch_top_patents(query, num_results=10, after_date=None, before_date=None, 
                     'inventors': inventors
                 })
         
-        start += 10  # Increment by 10 (SerpAPI's typical page size)
-        if len(organic_results) < 10:  # If less than a full page, likely end of results
+        page += 1  # Increment page
+        
+        if len(organic_results) < params["num"]:  # If less than requested num, likely end of results
             break
     
     # Truncate to requested number if more were fetched
@@ -242,7 +245,7 @@ def analyze_patent(patent_id, user_prompt):
     ]
     
     final_response = client.chat.completions.create(
-        model="grok-3-mini",
+        model="grok-3",
         messages=synthesis_messages,
         max_tokens=2000,
         temperature=0.5,
@@ -280,7 +283,7 @@ def generate_html(all_practices, user_query):
         link = data['link']
         filing_date = data['filing_date']
         title = data['title']
-        inventors = ', '.join(data['inventors'])  # Join inventors list into a string
+        inventors = ', '.join(data['inventors'])
         html_content += f"<h2>Patent <a href='{link}'>{patent_id}</a> (Title: {title}, Inventor(s): {inventors}, Filing Date: {filing_date})</h2>"
         
         if practices:
